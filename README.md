@@ -12,7 +12,7 @@ referenced where relevant.
 3. [Pods](#3-pods)
 4. [Workloads (Deployment, ReplicaSet, DaemonSet, StatefulSet)](#4-workloads)
 5. [Updates: Rolling Update vs Rollback](#5-updates-rolling-update-vs-rollback)
-6. [Scaling & Scheduling (Resource limits, HPA, metrics-server)](#6-scaling--scheduling)
+6. [Scaling & Scheduling (Resource limits, HPA, VPA, metrics-server)](#6-scaling--scheduling)
 7. [Networking (Service, port-forward, Ingress)](#7-networking)
 8. [Storage (PersistentVolume & PersistentVolumeClaim)](#8-storage)
 9. [Configuration (ConfigMap & Secret)](#9-configuration)
@@ -183,6 +183,38 @@ kubectl top pods -n <namespace>
 
 > Note: `kubectl top nodes` is cluster-scoped (no `-n`). Use `-n` only with `top pods`.
 
+### Vertical Pod Autoscaler (VPA)
+Where HPA scales **out** (more pods), VPA scales **up** — it right-sizes a single pod's
+CPU/memory **requests & limits** based on real usage, so you neither over-provision nor get
+throttled/OOM-killed. See `apache/vpa.yml`.
+
+Unlike HPA, VPA is **not** built into the cluster — install it from the autoscaler repo:
+
+```bash
+git clone https://github.com/kubernetes/autoscaler.git
+cd autoscaler/vertical-pod-autoscaler
+./hack/vpa-up.sh        # installs the recommender, updater, and admission controller
+# ./hack/vpa-down.sh    # to uninstall later
+```
+
+`updateMode` controls how aggressive it is:
+- `"Off"` — only *recommends* values (read them with `kubectl describe vpa`); changes nothing.
+- `"Initial"` — applies resources only when a pod is first created.
+- `"Auto"` / `"Recreate"` — evicts and recreates running pods to apply new resources (this
+  is what `apache/vpa.yml` uses).
+
+```bash
+kubectl apply -f apache/vpa.yml
+kubectl get vpa -n apache
+kubectl describe vpa apache-vpa -n apache    # view the recommendation
+```
+
+> ⚠️ **Don't point HPA and VPA at the same metric** (e.g. both on CPU) for one workload —
+> they fight each other. In this repo, `apache/hpa.yml` and `apache/vpa.yml` *both* target
+> `apache-deployment` on CPU, so apply only one at a time. Valid combos: VPA for CPU/memory
+> **or** HPA for CPU; or HPA on custom metrics **plus** VPA on CPU/memory. VPA also needs
+> **metrics-server**.
+
 ---
 
 ## 7. Networking
@@ -307,6 +339,7 @@ kubectl get pods -n nginx -w
 | `apache/deployment.yml` | Deployment | apache | httpd, with resource requests/limits |
 | `apache/service.yml` | Service | apache | ClusterIP :80 |
 | `apache/hpa.yml` | HorizontalPodAutoscaler | apache | CPU-based, min 1 / max 5 |
+| `apache/vpa.yml` | VerticalPodAutoscaler | apache | right-sizes CPU/mem, `updateMode: Auto` |
 | `apache/ingress.yml` | Ingress | apache | `/apache` & `/nginx` routing |
 | `mysql/namespace.yml` | Namespace | — | `mysql` namespace |
 | `mysql/secret.yml` | Secret | mysql | root password (placeholder) |
@@ -324,5 +357,6 @@ kubectl apply -f apache/namespace.yml
 kubectl apply -f apache/deployment.yml
 kubectl apply -f apache/service.yml
 kubectl apply -f apache/hpa.yml          # needs metrics-server
+# kubectl apply -f apache/vpa.yml        # needs VPA installed (vpa-up.sh); don't run alongside hpa.yml
 kubectl apply -f apache/ingress.yml      # needs an ingress controller
 ```
