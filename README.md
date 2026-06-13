@@ -24,23 +24,83 @@ referenced where relevant.
 
 ## 1. Local Setup (Docker + kind)
 
+### Install the tools
+You need three things — and note **`kubectl` is separate**: kind creates the cluster, but
+`kubectl` is the CLI you talk to it with (kind does *not* bundle it).
+
 ```bash
-# Install Docker (see https://docs.docker.com/engine/install/)
-# Install kind  (see https://kind.sigs.k8s.io/docs/user/quick-start/)
+# 1. Docker   -> https://docs.docker.com/engine/install/
+# 2. kind     -> https://kind.sigs.k8s.io/docs/user/quick-start/
+# 3. kubectl  (NOT installed by kind):
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+kubectl version --client
+```
 
-# Allow your user to run docker without sudo, then refresh the group in the current shell
+On Linux, let your user run Docker without `sudo`, then refresh the group in the current
+shell (it's `usermod`, not `usermode`):
+
+```bash
 sudo usermod -aG docker $USER && newgrp docker
+```
 
-# Create a local cluster
-kind create cluster --name practice
+### Create the cluster *with a config* (so Ingress works)
+A bare `kind create cluster` can't receive traffic on ports 80/443, and the ingress-nginx
+controller only schedules onto a node labelled `ingress-ready=true`. Both must be set **at
+creation time** via a config file — you can't add them later. Save this as `kind-config.yml`:
 
-# Verify
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+```
+
+```bash
+kind create cluster --name practice --config kind-config.yml
 kubectl cluster-info --context kind-practice
 kubectl get nodes
 ```
 
-> Note: it's `usermod` (not `usermode`). `newgrp docker` reloads your group membership
-> so you don't have to log out and back in.
+- `extraPortMappings` forwards your host's `localhost:80/443` into the node, so
+  `curl localhost/apache` reaches the Ingress.
+- `node-labels: ingress-ready=true` lets the ingress controller pod schedule — without it
+  the controller stays `Pending` forever.
+
+### Install cluster add-ons
+These aren't part of kind; install them once the cluster is up:
+
+```bash
+# Ingress controller (kind-specific manifest — needed by apache/ingress.yml)
+kubectl apply -f https://kind.sigs.k8s.io/examples/ingress/deploy-ingress-nginx.yaml
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=90s
+
+# metrics-server (needed by HPA/VPA + `kubectl top`) — see Section 6 for the kind TLS patch
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+```
+
+> Hitting `too many open files` on a larger cluster? That's a host sysctl limit, not
+> Kubernetes:
+> ```bash
+> sudo sysctl fs.inotify.max_user_watches=524288
+> sudo sysctl fs.inotify.max_user_instances=512
+> ```
 
 ---
 
